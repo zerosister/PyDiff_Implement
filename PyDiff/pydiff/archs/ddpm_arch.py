@@ -178,7 +178,28 @@ class GaussianDiffusion(nn.Module):
         out = out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))
         return out
 
-
+    # 在去噪扩散概率模型中采样。逐步去噪生成高质量图像
+    # args:
+    #     x_in: 输入图像
+    #     pyramid_list: 降采样尺度列表
+    #     ddim_timesteps: 逐步去噪的次数
+    #     ddim_discr_method: 逐步去噪的离散化方法，uniform为均匀离散，quad为二次离散
+    #     ddim_eta: 逐步去噪的学习率
+    #     clip_denoised: 是否对生成的图像进行裁剪
+    #     continous: 是否连续逐步去噪
+    #     return_x_recon: 是否返回生成的图像
+    #     return_pred_noise: 是否返回预测的噪声
+    #     return_all: 是否返回所有中间过程
+    #     pred_type: 预测噪声的方式，目前只支持pred_noise
+    #     clip_noise: 是否对预测的噪声进行裁剪
+    #     save_noise: 是否保存噪声
+    #     color_gamma: 色彩空间的伽马值
+    #     color_times: 色彩空间的迭代次数
+    #     fine_diffV2: 是否使用fine_diffV2
+    #     fine_diffV2_st: fine_diffV2的起始时间步
+    #     fine_diffV2_num_timesteps: fine_diffV2的迭代次数    
+    #     do_some_global_deg: 是否进行全局降采样
+    #     use_up_v2: 是否使用upsample_v2
     # use ddim to sample
     @torch.no_grad()
     def ddim_pyramid_sample(
@@ -205,10 +226,14 @@ class GaussianDiffusion(nn.Module):
         use_up_v2=False):
 
         assert len(pyramid_list) == ddim_timesteps, f'len(pyramid_list):{len(pyramid_list)} != ddim_timesteps{ddim_timesteps}'
+        # print(f"x_in shape: {x_in.shape}")
 
+
+        # 返回值检查，不能同时为 True
         if return_all:
             assert not (return_x_recon or return_pred_noise), "[return_x_recon, return_pred_noise, return_all], choose one or not!"
         assert not (return_x_recon and return_pred_noise), "[return_x_recon, return_pred_noise, return_all], choose one or not!"
+        
         # make ddim timestep sequence
         if ddim_discr_method == 'uniform':
             c = self.num_timesteps // ddim_timesteps
@@ -227,10 +252,12 @@ class GaussianDiffusion(nn.Module):
         b, c, h, w = x_in[:, :3, :, :].shape
         init_h = h // pyramid_list[-1]
         init_w = w // pyramid_list[-1]
+        
         # start from pure noise (for each example in the batch)
         sample_img = torch.randn((b, c, init_h, init_w), device=device)
         sample_inter = (1 | (ddim_timesteps//10))
         ret_img = x_in[:, :3, :, :]
+        
         for i in tqdm(reversed(range(0, ddim_timesteps)), desc='sampling loop time step', total=ddim_timesteps):
             if return_all and i % sample_inter == 0:
                 all_process = [F.interpolate(sample_img, (h, w))]

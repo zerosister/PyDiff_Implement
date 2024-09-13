@@ -4,3 +4,5 @@ experiments
 # pretrained_models
 pretrained_models/LOLweights.pth
 dataset/LOLdataset
+LOLdataset.zip
+.vscode
