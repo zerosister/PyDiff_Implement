@@ -1,5 +1,19 @@
 [![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/pyramid-diffusion-models-for-low-light-image/low-light-image-enhancement-on-lol)](https://paperswithcode.com/sota/low-light-image-enhancement-on-lol?p=pyramid-diffusion-models-for-low-light-image)
 
+# 开始
+* 首先将环境按照下方的 Dependencies and Installation 部分进行配置。
+* 下载模型，放入 pretrained_models 文件夹
+* 将 LOL 数据集按照下方的文件结构放置
+* `cd PyDiff/` 运行 `python pydiff/train.py -opt options/infer.yaml` 进行测试
+* 得到结果如下方所示，在 visualization 文件夹下可以找到期待得到的结果。
+```
+./
+└── infer
+    └── visualization
+        └── 期待得到的结果.png
+```
+
+
 # [IJCAI 2023 oral] Pyramid Diffusion Models For Low-light Image Enhancement
 ### [Paper](https://arxiv.org/pdf/2305.10028.pdf) | [Project Page](https://github.com/limuloo/PyDIff) | [Supplement Materials](https://drive.google.com/file/d/1_c5nM_bQkdDMWASpY-3aoxf_YYzfWCwf/view)
 **Pyramid Diffusion Models For Low-light Image Enhancement**
