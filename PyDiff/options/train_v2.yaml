@@ -52,11 +52,13 @@ network_unet:
   out_channel: 3
   inner_channel: 64
   norm_groups: 32
-  channel_mults: [1,2,4,8,8]
-  attn_res: [16]
+  channel_mults: [1,2,4,8,8] # 表示通道数的增加倍数
+  attn_res: [16] # 表示在 resolution 为 16 的时候使用 attention
   res_blocks: 2
   dropout: 0.2
   divide: 16
+  use_frequency_block: false
+  use_DWConv: false
 
 network_global_corrector:
   type: GlobalCorrector
@@ -68,7 +70,7 @@ network_ddpm:
   channels: 3
   conditional: true
   color_limit: -1
-  pyramid_list: [1, 1, 2, 2]
+  pyramid_list: [2, 2, 2, 2]
 
 ddpm_schedule:
   schedule: "linear"

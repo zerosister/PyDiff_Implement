@@ -1,7 +1,7 @@
 # general settings
-name: infer
-model_type: PyDiffModel
-num_gpu: 2
+name: train_hvi
+model_type: HviDiffModel
+num_gpu: 1
 manual_seed: 0
 
 # dataset and data loader settings
@@ -13,11 +13,12 @@ datasets:
     input_root: "../dataset/LOLdataset/our485/low"
     input_mode: ~
     concat_with_position_encoding: true
-    concat_with_hiseq: true
-    hiseq_random_cat: true
+    concat_with_hiseq: false
+    hiseq_random_cat: false
     mean: [0.5, 0.5, 0.5]
     std: [0.5, 0.5, 0.5]
     use_flip: true
+    use_hvi: true
 
     bright_aug: true
     bright_aug_range: [0.5, 1.5]
@@ -36,17 +37,18 @@ datasets:
     type: LOL_Dataset
     gt_root: "../dataset/LOLdataset/eval15/high"
     input_root: "../dataset/LOLdataset/eval15/low"
-    concat_with_hiseq: true
+    concat_with_hiseq: false
     input_mode: pad
     divide: 32
     concat_with_position_encoding: true
     mean: [0.5, 0.5, 0.5]
     std: [0.5, 0.5, 0.5]
+    use_hvi: true
 
 # network structures
 network_unet:
   type: SR3UNet
-  in_channel: 13
+  in_channel: 10
   out_channel: 3
   inner_channel: 64
   norm_groups: 32
@@ -55,10 +57,7 @@ network_unet:
   res_blocks: 2
   dropout: 0.2
   divide: 16
-
-network_global_corrector:
-  type: GlobalCorrector
-  normal01: true
+  use_frequency_block: true
 
 network_ddpm:
   type: GaussianDiffusion
@@ -67,6 +66,7 @@ network_ddpm:
   conditional: true
   color_limit: -1
   pyramid_list: [1, 1, 2, 2]
+  use_hvi: true
 
 ddpm_schedule:
   schedule: "linear"
@@ -76,7 +76,7 @@ ddpm_schedule:
 
 # path
 path:
-  pretrain_network_g: "../pretrained_models/LOLweights.pth"
+  pretrain_network_g: ~
   param_key_g: params
   strict_load_g: False
   pretrain_network_d: ~
@@ -88,7 +88,7 @@ train:
   cs_on_shift: true
   vis_train: true
   vis_num: 150
-  train_type: ddpm_cs_pyramid
+  train_type: ddpm_hvi_pyramid
   t_border: 1000
   input_mode: crop
   crop_size: [192, 288]
@@ -106,18 +106,40 @@ train:
     type: MultiStepLR
     milestones: [50000, 75000, 100000, 150000, 200000]
     gamma: 0.5
-
+  
   total_iter: 500000
   warmup_iter: -1  # no warm up
+  
+  perceptual_opt:
+    type: PerceptualLoss
+    layer_weights:
+      'conv5_4': 1  # before relu
+    vgg_type: vgg19
+    use_input_norm: true
+    range_norm: false
+    perceptual_weight: 1.0
+    style_weight: 0
+    criterion: l1
+  ssim_opt:
+    type: SSIM
+    weight: 1.0
+  edge_opt:
+    type: EdgeLoss
+    loss_weight: 1.0
+  l1_opt:
+    type: L1Loss
+    loss_weight: 1.0
+  noise_opt:
+    type: L1Loss
+    loss_weight: 1.0
+  hvi_weight: 1.0
 
 # validation settings
 val:
-  cal_score: true
   split_log: true
   fix_seed: true
   color_gamma: 1.0
   use_up_v2: true
-  only_save_sr: true
   pyramid_list: [1, 1, 2, 2]
   ddim_eta: !!float 1.0
   ddim_timesteps: 4

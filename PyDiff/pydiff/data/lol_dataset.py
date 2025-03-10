@@ -28,6 +28,7 @@ class LOL_Dataset(data.Dataset):
                         glob.glob(os.path.join(self.gt_root, '*.jpg'))
         self.mean = self.opt['mean']
         self.std = self.opt['std']
+        self.use_hvi = self.opt.get('use_hvi', False)
         
     
 
@@ -44,7 +45,7 @@ class LOL_Dataset(data.Dataset):
             bright_aug_range = self.opt.get('bright_aug_range', [0.5, 1.5])
             input_img = input_img * np.random.uniform(*bright_aug_range)
         
-        if self.opt.get('concat_with_hiseq', False):
+        if self.opt.get('concat_with_hiseq', False): # 除开 r,g,b 通道外，还要加上 hiseq 通道，该通道也包含 3 个 channel
             hiseql = cv2.cvtColor(hiseq_color_cv2_img(cv2.imread(input_path)), cv2.COLOR_BGR2RGB) / 255.
             if self.opt.get('hiseq_random_cat', False) and np.random.uniform(0, 1) < self.opt.get('hiseq_random_cat_p', 0.5):
                 input_img = np.concatenate([hiseql, input_img], axis=2)
@@ -61,7 +62,7 @@ class LOL_Dataset(data.Dataset):
                 if np.random.uniform() < 0.5:
                     input_img[:, :, 3:] = 0
 
-        if self.opt.get('use_flip', False) and np.random.uniform() < 0.5:
+        if self.opt.get('use_flip', False) and np.random.uniform() < 0.5: # 是否进行水平翻转
             gt_img = cv2.flip(gt_img, 1, gt_img)
             input_img = cv2.flip(input_img, 1, input_img)
         
@@ -76,7 +77,7 @@ class LOL_Dataset(data.Dataset):
         if self.opt.get('concat_with_position_encoding', False):
             H, W, _ = input_img.shape
             L = self.opt.get('position_encoding_L', 1)
-            position_encoding = generate_position_encoding(H, W, L)
+            position_encoding = generate_position_encoding(H, W, L) # channel 为 4，因为有 sinx,cosx,siny,cosy
             input_img = np.concatenate([input_img, position_encoding], axis=2)
         
         if self.opt.get('resize', False):
@@ -88,7 +89,7 @@ class LOL_Dataset(data.Dataset):
                 gt_img = cv2.resize(gt_img, dsize=(resize_size[1], resize_size[0]))
                 input_img = cv2.resize(input_img, dsize=(resize_size[1], resize_size[0]))
 
-        if self.opt['input_mode'] == 'crop':
+        if self.opt['input_mode'] == 'crop': # 随机裁剪，得到大小为 crop_size x crop_size 的图片
             crop_size = self.opt['crop_size']
             H, W, _ = input_img.shape
             assert input_img.shape[:2] == gt_img.shape[:2], f"{input_img.shape}, {gt_img.shape}, {gt_path}"
@@ -118,8 +119,9 @@ class LOL_Dataset(data.Dataset):
 
         input_img_pt = input_img_pt.float()
         gt_img_pt = gt_img_pt.float()
-        normalize(input_img_pt, [0.5] * input_img_pt.shape[0], [0.5] * input_img_pt.shape[0], inplace=True)
-        normalize(gt_img_pt, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5], inplace=True)
+        if not self.use_hvi:
+          normalize(input_img_pt, [0.5] * input_img_pt.shape[0], [0.5] * input_img_pt.shape[0], inplace=True)
+          normalize(gt_img_pt, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5], inplace=True)
         if hasattr(self, 'low_resolution_hq'):
             normalize(
                 self.low_resolution_hq, 

@@ -7,8 +7,10 @@ import pydiff.data
 import pydiff.models
 
 if __name__ == '__main__':
-  # os.path is used to get the root path of the script.
-  # osp.pardir is used to get the parent directory of the current directory.(i.e. "..")
-  # osp.join get __file__ and then go up two levels to get the root path.
+    import debugpy
+    print("waiting for debugger to attach")
+    debugpy.listen(5678)
+    debugpy.wait_for_client()
+    print("debugger attached")
     root_path = osp.abspath(osp.join(__file__, osp.pardir, osp.pardir))
     train_pipeline(root_path)

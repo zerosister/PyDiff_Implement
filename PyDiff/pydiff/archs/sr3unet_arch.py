@@ -32,7 +32,7 @@ class PositionalEncoding(nn.Module):
             [torch.sin(encoding), torch.cos(encoding)], dim=-1)
         return encoding
 
-
+# 对特征进行仿射变换
 class FeatureWiseAffine(nn.Module):
     def __init__(self, in_channels, out_channels, use_affine_level=False):
         super(FeatureWiseAffine, self).__init__()
@@ -92,30 +92,82 @@ class Block(nn.Module):
     def forward(self, x):
         return self.block(x)
 
+class DepthWiseConv2d(nn.Module):
+    def __init__(self, dim, dim_out, groups=32, dropout=0):
+        super(DepthWiseConv2d, self).__init__()
+        self.dwconv = nn.Sequential(
+            nn.GroupNorm(groups, dim),
+            Swish(),
+            nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, groups=4, bias=False),
+            nn.GroupNorm(groups, dim),
+            Swish(),
+            nn.Conv2d(dim, dim_out, kernel_size=1, stride=1, padding=0, bias=False),
+        )
+    
+    def forward(self, x):
+        return self.dwconv(x)
+
+class FreBlock(nn.Module):
+    def __init__(self, in_channels,out_channels):
+        super(FreBlock, self).__init__()
+        self.processmag = nn.Sequential(
+            nn.Conv2d(in_channels,in_channels,1,1,0),
+            nn.LeakyReLU(0.1,inplace=True),
+            nn.Conv2d(in_channels,out_channels,1,1,0))
+        self.processpha = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels, 1, 1, 0),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.Conv2d(in_channels, out_channels, 1, 1, 0))
+
+    def forward(self,x):
+        # xori = x
+        _, _, H, W = x.shape
+        x_freq = torch.fft.rfft2(x, norm='backward')
+        mag = torch.abs(x_freq)
+        pha = torch.angle(x_freq)
+        mag = self.processmag(mag)
+        pha = self.processpha(pha)
+        real = mag * torch.cos(pha)
+        imag = mag * torch.sin(pha)
+        x_out = torch.complex(real, imag)
+        x_out1 = torch.fft.irfft2(x_out, s=(H, W), norm='backward')
+        return x_out1
 
 class ResnetBlock(nn.Module):
-    def __init__(self, dim, dim_out, noise_level_emb_dim=None, dropout=0, use_affine_level=False, norm_groups=32, use_CA=False):
+    def __init__(self, dim, dim_out, noise_level_emb_dim=None, dropout=0, use_affine_level=False, norm_groups=32, use_CA=False, use_frequency_block=False, use_DWConv=False):
         super().__init__()
         if noise_level_emb_dim is not None:
             self.noise_func = FeatureWiseAffine(
                 noise_level_emb_dim, dim_out, use_affine_level)
-
-        self.block1 = Block(dim, dim_out, groups=norm_groups)
-        self.block2 = Block(dim_out, dim_out, groups=norm_groups, dropout=dropout)
+        
+        if use_DWConv:
+          self.block1 = DepthWiseConv2d(dim, dim_out, groups=norm_groups)
+          self.block2 = DepthWiseConv2d(dim_out, dim_out, groups=norm_groups)
+        else:
+          self.block1 = Block(dim, dim_out, groups=norm_groups)
+          self.block2 = Block(dim_out, dim_out, groups=norm_groups, dropout=dropout)
         self.res_conv = nn.Conv2d(
             dim, dim_out, 1) if dim != dim_out else nn.Identity()
         self.use_CA = use_CA
+        self.use_frequency_block = use_frequency_block
         if self.use_CA:
             self.ca_block = CALayer(dim_out)
+        if self.use_frequency_block: 
+            self.freBlock = FreBlock(dim, dim_out)
 
     def forward(self, x, time_emb):
         b, c, h, w = x.shape
         h = self.block1(x)
+        if self.use_frequency_block:
+            fre = self.freBlock(x)
+            
         if time_emb is not None:
             h = self.noise_func(h, time_emb)
         h = self.block2(h)
         if self.use_CA:
             h = self.ca_block(h)
+        if self.use_frequency_block:
+            h = h + fre
         return h + self.res_conv(x)
 
 
@@ -148,16 +200,17 @@ class SelfAttention(nn.Module):
         out = torch.einsum("bnhwyx, bncyx -> bnchw", attn, value).contiguous()
         out = self.out(out.view(batch, channel, height, width))
 
-        return out + input
-
-
+        return out + input      
+      
 class ResnetBlocWithAttn(nn.Module):
     def __init__(self, dim, dim_out, *, noise_level_emb_dim=None, norm_groups=32, dropout=0, \
-        with_attn=False, use_affine_level=False, use_CA=False, attn_type=None):
+        with_attn=False, use_affine_level=False, use_CA=False, attn_type=None, use_frequency_block=False, use_DWConv=False):
         super().__init__()
         self.with_attn = with_attn
         self.res_block = ResnetBlock(
-            dim, dim_out, noise_level_emb_dim, norm_groups=norm_groups, dropout=dropout, use_affine_level=use_affine_level, use_CA=use_CA)
+            dim, dim_out, noise_level_emb_dim, norm_groups=norm_groups, dropout=dropout, \
+              use_affine_level=use_affine_level, use_CA=use_CA, \
+              use_frequency_block=use_frequency_block, use_DWConv=use_DWConv)
         if with_attn:
             if not attn_type:
                 self.attn = SelfAttention(dim_out, norm_groups=norm_groups)
@@ -169,12 +222,17 @@ class ResnetBlocWithAttn(nn.Module):
                 self.attn = CALayerV2(dim_out)
             else:
                 assert False, "attn_type, error"
+        self.use_frequency_block = use_frequency_block
+        # if use_frequency_block:
+        #     self.freq_block = FreBlock(dim_out, dim_out)
 
 
     def forward(self, x, time_emb):
         x = self.res_block(x, time_emb)
         if(self.with_attn):
             x = self.attn(x)
+        # if self.use_frequency_block:
+        #     x = self.freq_block(x)
         return x
 
 @ARCH_REGISTRY.register()
@@ -197,7 +255,9 @@ class SR3UNet(nn.Module):
         divide=None,
         drop2d_input=False,
         drop2d_input_p=0.0,
-        channel_randperm_input=False
+        channel_randperm_input=False,
+        use_frequency_block=False,
+        use_DWConv=False
     ):
         super().__init__()
         self.drop2d_input = drop2d_input
@@ -207,7 +267,7 @@ class SR3UNet(nn.Module):
         self.channel_randperm_input = channel_randperm_input
 
         if with_noise_level_emb:
-            noise_level_channel = inner_channel
+            noise_level_channel = inner_channel         # 嵌入时间步骤？
             self.noise_level_mlp = nn.Sequential(
                 PositionalEncoding(inner_channel),
                 nn.Linear(inner_channel, inner_channel * 4),
@@ -223,7 +283,7 @@ class SR3UNet(nn.Module):
         num_mults = len(channel_mults)
         pre_channel = inner_channel
         feat_channels = [pre_channel]
-        now_res = image_size
+        now_res = image_size # 由于 image_size 默认是 128 所以经过 3 次下采样后，分辨率会是 16，即加入 attention
         downs = [nn.Conv2d(in_channel, inner_channel,
                            kernel_size=3, padding=1)]
         for ind in range(num_mults):
@@ -233,7 +293,7 @@ class SR3UNet(nn.Module):
             for _ in range(0, res_blocks):
                 downs.append(ResnetBlocWithAttn(
                     pre_channel, channel_mult, noise_level_emb_dim=noise_level_channel, norm_groups=norm_groups, dropout=dropout, with_attn=use_attn, use_affine_level=use_affine_level, \
-                        use_CA=use_CA, attn_type=attn_type))
+                        use_CA=use_CA, attn_type=attn_type, use_frequency_block=use_frequency_block,use_DWConv=use_DWConv))
                 feat_channels.append(channel_mult)
                 pre_channel = channel_mult
             if not is_last:
@@ -247,10 +307,10 @@ class SR3UNet(nn.Module):
         self.mid = nn.ModuleList([
             ResnetBlocWithAttn(pre_channel, pre_channel, noise_level_emb_dim=noise_level_channel, norm_groups=norm_groups,
                                dropout=dropout, with_attn=mid_use_attn, use_affine_level=use_affine_level, use_CA=use_CA,
-                               attn_type=attn_type),
+                               attn_type=attn_type, use_frequency_block=use_frequency_block,use_DWConv=use_DWConv),
             ResnetBlocWithAttn(pre_channel, pre_channel, noise_level_emb_dim=noise_level_channel, norm_groups=norm_groups,
                                dropout=dropout, with_attn=False, use_affine_level=use_affine_level, use_CA=use_CA,
-                               attn_type=attn_type)
+                               attn_type=attn_type, use_frequency_block=use_frequency_block,use_DWConv=use_DWConv)
         ])
 
         ups = []
@@ -261,7 +321,7 @@ class SR3UNet(nn.Module):
             for _ in range(0, res_blocks+1):
                 ups.append(ResnetBlocWithAttn(
                     pre_channel+feat_channels.pop(), channel_mult, noise_level_emb_dim=noise_level_channel, norm_groups=norm_groups,
-                        dropout=dropout, with_attn=use_attn, use_affine_level=use_affine_level, use_CA=use_CA, attn_type=attn_type))
+                        dropout=dropout, with_attn=use_attn, use_affine_level=use_affine_level, use_CA=use_CA, attn_type=attn_type, use_frequency_block=use_frequency_block,use_DWConv=use_DWConv))
                 pre_channel = channel_mult
             if not is_last:
                 ups.append(Upsample(pre_channel))

@@ -9,7 +9,19 @@ from tqdm import tqdm
 import random
 from basicsr.utils.registry import ARCH_REGISTRY
 from scripts.utils import pad_tensor, pad_tensor_back
+from .HVI_transform_arch import RGB_HVI
+from torchvision.transforms.functional import normalize
 
+def hvi_clamp(img, min_val=-1, max_val=1):
+    H,V,I = img[:,0,:,:],img[:,1,:,:],img[:,2,:,:]
+    
+    # clip
+    H = torch.clamp(H,-1,1)
+    V = torch.clamp(V,-1,1)
+    I = torch.clamp(I,0,1)
+
+    # 合并
+    return torch.stack([H,V,I],dim=1)
 
 def _warmup_beta(linear_start, linear_end, n_timestep, warmup_frac):
     betas = linear_end * np.ones(n_timestep, dtype=np.float64)
@@ -82,7 +94,8 @@ class GaussianDiffusion(nn.Module):
         color_limit=None,
         resize_all=False,
         resize_res=-1,
-        pyramid_list=[1]
+        pyramid_list=[1],
+        use_hvi=False,
     ):
         super().__init__()
         self.channels = channels
@@ -101,6 +114,10 @@ class GaussianDiffusion(nn.Module):
         self.resize_res = resize_res
         self.pyramid_list = pyramid_list
 
+        # 若使用 hvi_field，则需要初始化 hvi_field 模块
+        if use_hvi:
+            self.rgb_hvi = RGB_HVI()
+        
     def set_loss(self, device):
         if self.loss_type == 'l1':
             self.loss_func = nn.L1Loss(reduction='sum').to(device)
@@ -178,28 +195,7 @@ class GaussianDiffusion(nn.Module):
         out = out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))
         return out
 
-    # 在去噪扩散概率模型中采样。逐步去噪生成高质量图像
-    # args:
-    #     x_in: 输入图像
-    #     pyramid_list: 降采样尺度列表
-    #     ddim_timesteps: 逐步去噪的次数
-    #     ddim_discr_method: 逐步去噪的离散化方法，uniform为均匀离散，quad为二次离散
-    #     ddim_eta: 逐步去噪的学习率
-    #     clip_denoised: 是否对生成的图像进行裁剪
-    #     continous: 是否连续逐步去噪
-    #     return_x_recon: 是否返回生成的图像
-    #     return_pred_noise: 是否返回预测的噪声
-    #     return_all: 是否返回所有中间过程
-    #     pred_type: 预测噪声的方式，目前只支持pred_noise
-    #     clip_noise: 是否对预测的噪声进行裁剪
-    #     save_noise: 是否保存噪声
-    #     color_gamma: 色彩空间的伽马值
-    #     color_times: 色彩空间的迭代次数
-    #     fine_diffV2: 是否使用fine_diffV2
-    #     fine_diffV2_st: fine_diffV2的起始时间步
-    #     fine_diffV2_num_timesteps: fine_diffV2的迭代次数    
-    #     do_some_global_deg: 是否进行全局降采样
-    #     use_up_v2: 是否使用upsample_v2
+
     # use ddim to sample
     @torch.no_grad()
     def ddim_pyramid_sample(
@@ -223,17 +219,14 @@ class GaussianDiffusion(nn.Module):
         fine_diffV2_st=200,
         fine_diffV2_num_timesteps=20,
         do_some_global_deg=False,
-        use_up_v2=False):
+        use_up_v2=False,
+        use_hvi=False):
 
         assert len(pyramid_list) == ddim_timesteps, f'len(pyramid_list):{len(pyramid_list)} != ddim_timesteps{ddim_timesteps}'
-        # print(f"x_in shape: {x_in.shape}")
 
-
-        # 返回值检查，不能同时为 True
         if return_all:
             assert not (return_x_recon or return_pred_noise), "[return_x_recon, return_pred_noise, return_all], choose one or not!"
         assert not (return_x_recon and return_pred_noise), "[return_x_recon, return_pred_noise, return_all], choose one or not!"
-        
         # make ddim timestep sequence
         if ddim_discr_method == 'uniform':
             c = self.num_timesteps // ddim_timesteps
@@ -252,12 +245,12 @@ class GaussianDiffusion(nn.Module):
         b, c, h, w = x_in[:, :3, :, :].shape
         init_h = h // pyramid_list[-1]
         init_w = w // pyramid_list[-1]
-        
         # start from pure noise (for each example in the batch)
         sample_img = torch.randn((b, c, init_h, init_w), device=device)
         sample_inter = (1 | (ddim_timesteps//10))
         ret_img = x_in[:, :3, :, :]
-        
+        if use_hvi:
+          x_in[:, :3, :, :] = self.rgb_hvi.HVIT(x_in[:, :3, :, :])
         for i in tqdm(reversed(range(0, ddim_timesteps)), desc='sampling loop time step', total=ddim_timesteps):
             if return_all and i % sample_inter == 0:
                 all_process = [F.interpolate(sample_img, (h, w))]
@@ -306,7 +299,11 @@ class GaussianDiffusion(nn.Module):
                 all_process.append(F.interpolate(pred_x0, (h, w)))
 
             if clip_denoised:
-                pred_x0 = torch.clamp(pred_x0, min=-1., max=1.)
+                if use_hvi:
+                  pred_x0 = hvi_clamp(pred_x0)
+                else:
+                  pred_x0 = torch.clamp(pred_x0, min=-1., max=1.)
+                
             
             sample_already = False
 
@@ -349,7 +346,9 @@ class GaussianDiffusion(nn.Module):
         if continous:
             return ret_img
         else:
-            return sample_img
+          if use_hvi:
+            sample_img = self.rgb_hvi.PHVIT(sample_img)
+          return sample_img
 
 
 
@@ -669,6 +668,117 @@ class GaussianDiffusion(nn.Module):
         continuous_alpha_cumprod = continuous_sqrt_alpha_cumprod_mean * continuous_sqrt_alpha_cumprod_mean
         color_scale = torch.sqrt((1 - continuous_alpha_cumprod) / continuous_alpha_cumprod)
         return self.pred_noise, self.noise, self.x_recon_cs, self.x_start, self.t, color_scale
+ 
+    def p_losses_hvi_pyramid(self, x_HR, x_SR, noise=None, different_t_in_one_batch=False, clip_noise=False, t_range=None,\
+                 color_shift=None, color_prob=0.25, color_shift_with_schedule=False, \
+                  pad_after_crop=False, input_mode='crop', frozen_denoise=None, crop_size=160):
+        if not t_range:
+            t_range = [1, self.num_timesteps]
+
+        b = x_HR.shape[0]
+        if different_t_in_one_batch:
+            t = torch.randint(0, self.num_timesteps, (b,)).long() + 1
+            t = t.to(x_HR.device)
+            continuous_sqrt_alpha_cumprod = self._extract(torch.from_numpy(self.sqrt_alphas_cumprod_prev), t, x_start.shape)
+            continuous_sqrt_alpha_cumprod = continuous_sqrt_alpha_cumprod.view(b, -1)
+        else:
+          t = np.random.randint(t_range[0], t_range[1] + 1) # [1, 2000] [1, 2001)
+          continuous_sqrt_alpha_cumprod = torch.FloatTensor(
+              np.random.uniform(
+                  self.sqrt_alphas_cumprod_prev[t-1],
+                  self.sqrt_alphas_cumprod_prev[t],
+                  size=b
+              )
+          ).to(x_HR.device)
+          # continuous_sqrt_alpha_cumprod 是 sqrt(γ)
+          continuous_sqrt_alpha_cumprod = continuous_sqrt_alpha_cumprod.view(
+              b, -1)
+       
+        # 应用 pyramid 策略
+        r = self.downsampling_schedule[t - 1]
+        x_HR = F.interpolate(x_HR, (x_HR.shape[2] // r, x_HR.shape[3] // r))
+        x_SR = F.interpolate(x_SR, (x_SR.shape[2] // r, x_SR.shape[3] // r))
+
+        _, _, H, W = x_HR.shape
+        if input_mode == 'crop':
+            if isinstance(crop_size, int):
+                crop_size = [crop_size, crop_size]
+            if H < crop_size[0]:
+                crop_size[0] = H
+            if W < crop_size[1]:
+                crop_size[1] = W
+            h = np.random.randint(0, H - crop_size[0] + 1)
+            w = np.random.randint(0, W - crop_size[1] + 1)
+            x_HR = x_HR[:, :, h: h + crop_size[0], w: w + crop_size[1]]
+            x_SR = x_SR[:, :, h: h + crop_size[0], w: w + crop_size[1]]
+        elif input_mode == 'pad':
+            assert False, "wait to do!!"
+        if pad_after_crop:
+            x_HR, pad_left, pad_right, pad_top, pad_bottom = pad_tensor(x_HR, 16)
+            x_SR, pad_left, pad_right, pad_top, pad_bottom = pad_tensor(x_SR, 16)
+
+        # 切换到 hvi 模式
+        assert self.rgb_hvi is not None, "must set rgb_hvi first!!"
+        x_SR_hvi = x_SR
+        x_SR_hvi[:, 0:3, :, :] = self.rgb_hvi.HVIT(x_SR[:, 0:3, :, :])
+        # x_SR_hvi = normalize(x_SR_hvi, [0.5] * x_SR_hvi.shape[1], [0.5] * x_SR_hvi.shape[1], inplace=True)
+        x_HR_hvi = self.rgb_hvi.HVIT(x_HR)
+        
+        x_start = x_HR_hvi
+        [b, c, h, w] = x_start.shape
+
+
+        noise = default(noise, lambda: torch.randn_like(x_start))
+
+        if color_shift and np.random.uniform(0., 1.) < color_prob:
+            shift_val = torch.from_numpy(np.random.uniform(-color_shift, +color_shift, (b, c))).to(x_start.device)
+            shift_val = torch.unsqueeze(shift_val, -1)
+            shift_val = torch.unsqueeze(shift_val, -1)
+            if color_shift_with_schedule:
+                shift_val *= self.sqrt_one_minus_alphas_cumprod[t - 1]
+            shift_val = shift_val.float()
+            x_start_color = x_start + shift_val
+            x_start_color = torch.clamp(x_start_color, -1, 1)
+            x_noisy = self.q_sample(
+                x_start=x_start_color, continuous_sqrt_alpha_cumprod=continuous_sqrt_alpha_cumprod.view(-1, 1, 1, 1), noise=noise)
+            noise = (self.sqrt_recip_alphas_cumprod[t - 1] * x_noisy - x_start) / self.sqrt_recipm1_alphas_cumprod[t - 1]
+        else:
+            x_noisy = self.q_sample(
+                x_start=x_start, continuous_sqrt_alpha_cumprod=continuous_sqrt_alpha_cumprod.view(-1, 1, 1, 1), noise=noise)
+
+        if not self.conditional:
+            model_output = self.denoise_fn(x_noisy, continuous_sqrt_alpha_cumprod)
+        else:
+            model_output = self.denoise_fn(
+                torch.cat([x_SR_hvi, x_noisy], dim=1), continuous_sqrt_alpha_cumprod)
+            # from zdw_scripts.utils import tensor2img
+            # tensor2img(x_in['SR'], min_max=(-1, 1)).save('./SR.png')
+            # tensor2img(x_in['HR'], min_max=(-1, 1)).save('./HR.png')
+            # tensor2img(x_noisy, min_max=(-1, 1)).save('./x_noisy.png')
+            # tensor2img(x_recon, min_max=(-1, 1)).save('./x_recon.png')
+            # tensor2img(noise, min_max=(-1, 1)).save('./noise.png')
+
+        if clip_noise:
+            model_output = torch.clamp(model_output, -1, 1)
+        if pad_after_crop:
+            noise = pad_tensor_back(noise, pad_left, pad_right, pad_top, pad_bottom)
+            model_output = pad_tensor_back(model_output, pad_left, pad_right, pad_top, pad_bottom)
+            x_start = pad_tensor_back(x_start, pad_left, pad_right, pad_top, pad_bottom)
+            x_noisy = pad_tensor_back(x_noisy, pad_left, pad_right, pad_top, pad_bottom)
+        self.noise = noise
+        self.pred_noise = model_output
+        self.pred_noise_detach = self.pred_noise.detach()
+        self.x_start = x_start
+        self.x_noisy = x_noisy
+        self.x_rgb_HR = x_HR
+
+        self.x_recon_hvi = self.sqrt_recip_alphas_cumprod[t - 1] * x_noisy - self.sqrt_recipm1_alphas_cumprod[t - 1] * model_output
+        self.t = t - 1
+
+        self.x_recon_hvi = hvi_clamp(self.x_recon_hvi) # 限制到对应值
+        self.x_recon_rgb = self.rgb_hvi.PHVIT(self.x_recon_hvi) # 还原到 RGB
+
+        return self.pred_noise, self.noise, self.x_recon_rgb, self.x_recon_hvi, self.x_rgb_HR, self.x_start, self.t
 
     def forward(self, x_HR, x_SR, train_type='ddpm', *args, **kwargs):
         kwargs_cp = kwargs.copy()
@@ -681,5 +791,7 @@ class GaussianDiffusion(nn.Module):
             return self.p_losses_cs(x_HR, x_SR, *args, **kwargs)
         elif train_type == 'ddpm_cs_pyramid':
             return self.p_losses_cs_pyramid(x_HR, x_SR, *args, **kwargs)
+        elif train_type == 'ddpm_hvi_pyramid':
+            return self.p_losses_hvi_pyramid(x_HR, x_SR, *args, **kwargs)
         else:
             assert False, f"Wrong train_type={train_type}"

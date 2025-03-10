@@ -55,6 +55,7 @@ network_unet:
   res_blocks: 2
   dropout: 0.2
   divide: 16
+  use_frequency_block: true
 
 network_global_corrector:
   type: GlobalCorrector
@@ -91,7 +92,8 @@ train:
   train_type: ddpm_cs_pyramid
   t_border: 1000
   input_mode: crop
-  crop_size: [192, 288]
+  # crop_size: [192, 288]
+  crop_size: [176, 264]
   optim_g:
     type: Adam
     lr: !!float 1e-4

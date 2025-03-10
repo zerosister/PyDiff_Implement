@@ -27,10 +27,10 @@ from torch.nn.parallel import DataParallel, DistributedDataParallel
 from scripts.utils import pad_tensor_back
 
 @MODEL_REGISTRY.register()
-class PyDiffModel(BaseModel):
+class HviDiffModel(BaseModel):
 
     def __init__(self, opt):
-        super(PyDiffModel, self).__init__(opt)
+        super(HviDiffModel, self).__init__(opt)
 
         # define u-net network
         self.unet = build_network(opt['network_unet'])
@@ -40,8 +40,10 @@ class PyDiffModel(BaseModel):
         # test
         # gc = OrderedDict([('type', 'GlobalCorrector'), ('normal01', True)])
 
-        self.global_corrector = build_network(opt['network_global_corrector'])
-        self.global_corrector = self.model_to_device(self.global_corrector)
+        self.global_corrector = None
+        if opt.get('network_global_corrector') is not None:
+          self.global_corrector = build_network(opt['network_global_corrector'])
+          self.global_corrector = self.model_to_device(self.global_corrector)
         opt['network_ddpm']['color_fn'] = self.global_corrector
 
         self.ddpm = build_network(opt['network_ddpm'])
@@ -76,8 +78,48 @@ class PyDiffModel(BaseModel):
 
     def init_training_settings(self):
         self.ddpm.train()
+        train_opt = self.opt['train']
 
         # set up optimizers and schedulers
+        # TODO: add noise loss
+        if train_opt.get('noise_opt'):
+            self.l_noise = build_loss(train_opt['noise_opt']).to(self.device)
+        else:
+            self.l_noise = None
+
+        # TODO: add SSIM loss
+        if train_opt.get('ssim_opt'):
+            ssim_opt = train_opt.get('ssim_opt')
+            self.l_hvi_ssim = build_loss(ssim_opt).to(self.device)
+            self.l_rgb_ssim = build_loss(ssim_opt).to(self.device)
+        else:
+            self.l_hvi_ssim = None
+            self.l_rgb_ssim = None
+        # TODO: add Edge loss
+        if train_opt.get('edge_opt'):
+            edge_opt = train_opt.get('edge_opt')
+            self.l_hvi_edge = build_loss(edge_opt).to(self.device)
+            self.l_rgb_edge = build_loss(edge_opt).to(self.device)
+        else:
+            self.l_hvi_edge = None
+            self.l_rgb_edge = None
+        # TODO: add L1 loss, as weight is 1
+        if train_opt.get('l1_opt'):
+            self.l_hvi_l1 = build_loss(train_opt['l1_opt']).to(self.device)
+            self.l_rgb_l1 = build_loss(train_opt['l1_opt']).to(self.device)
+        else:
+            self.l_hvi_l1 = None
+            self.l_rgb_l1 = None
+        # TODO: add Perceptual loss
+        if train_opt.get('perceptual_opt'):
+            self.l_hvi_percep = build_loss(train_opt['perceptual_opt']).to(self.device)
+            self.l_rgb_percep = build_loss(train_opt['perceptual_opt']).to(self.device)
+        else:
+            self.l_hvi_percep = None
+            self.l_rgb_percep = None
+
+        if (self.l_hvi_l1 is None and self.l_hvi_edge is None and self.l_hvi_ssim is None and self.l_hvi_percep is None):
+            ValueError('No loss is specified.')
         self.setup_optimizers()
         self.setup_schedulers()
 
@@ -117,9 +159,9 @@ class PyDiffModel(BaseModel):
         # if self.opt['train'].get('mask_loss', False):
         #     assert self.opt['train'].get('cal_noise_only', False), "mask_loss can only used with cal_noise_only, now"
         # optimize net_g
-        assert 'ddpm_cs' in self.opt['train'].get('train_type', None), "train_type must be ddpm_cs"
+        assert 'ddpm_hvi' in self.opt['train'].get('train_type', None), "train_type must be ddpm_hvi"
         self.optimizer_g.zero_grad()
-        pred_noise, noise, x_recon_cs, x_start, t, color_scale = self.ddpm(self.HR, self.LR, 
+        pred_noise, noise, x_recon_rgb, x_recon_hvi, x_start_rgb, x_start_hvi, t = self.ddpm(self.HR, self.LR,
                   train_type=self.opt['train'].get('train_type', None),
                   different_t_in_one_batch=self.opt['train'].get('different_t_in_one_batch', None),
                   t_sample_type=self.opt['train'].get('t_sample_type', None),
@@ -128,18 +170,11 @@ class PyDiffModel(BaseModel):
                   color_shift=self.opt['train'].get('color_shift', None),
                   color_shift_with_schedule= self.opt['train'].get('color_shift_with_schedule', None),
                   t_range=self.opt['train'].get('t_range', None),
-                  cs_on_shift=self.opt['train'].get('cs_on_shift', None),
-                  cs_shift_range=self.opt['train'].get('cs_shift_range', None),
-                  t_border=self.opt['train'].get('t_border', None),
-                  down_uniform=self.opt['train'].get('down_uniform', False),
-                  down_hw_split=self.opt['train'].get('down_hw_split', False),
                   pad_after_crop=self.opt['train'].get('pad_after_crop', False),
                   input_mode=self.opt['train'].get('input_mode', None),
                   crop_size=self.opt['train'].get('crop_size', None),
-                  divide=self.opt['train'].get('divide', None),
-                  frozen_denoise=self.opt['train'].get('frozen_denoise', None),
-                  cs_independent=self.opt['train'].get('cs_independent', None),
-                  shift_x_recon_detach=self.opt['train'].get('shift_x_recon_detach', None))
+                  frozen_denoise=self.opt['train'].get('frozen_denoise', None)
+                  )
         if self.opt['train'].get('vis_train', False) and current_iter <= self.opt['train'].get('vis_num', 100) and \
             self.opt['rank'] == 0:
             '''
@@ -148,31 +183,30 @@ class PyDiffModel(BaseModel):
             '''
             save_img_path = osp.join(self.opt['path']['visualization'], 'train',
                                             f'{current_iter}_noise_level_{self.bare_model.t}.png')
-            x_recon_print = tensor2img(self.bare_model.x_recon, min_max=(-1, 1))
+            x_recon_print = tensor2img(self.bare_model.x_recon_rgb, min_max=(-1, 1))
             noise_print = tensor2img(self.bare_model.noise, min_max=(-1, 1))
             pred_noise_print = tensor2img(self.bare_model.pred_noise, min_max=(-1, 1))
-            x_start_print = tensor2img(self.bare_model.x_start, min_max=(-1, 1))
-            x_noisy_print = tensor2img(self.bare_model.x_noisy, min_max=(-1, 1))
+            x_start_print = tensor2img(self.bare_model.x_rgb_HR, min_max=(-1, 1))
+            # x_noisy_print = tensor2img(self.bare_model.x_noisy, min_max=(-1, 1))
 
-            img_print  = np.concatenate([x_start_print, noise_print, x_noisy_print, pred_noise_print, x_recon_print], axis=0)
+            img_print  = np.concatenate([x_start_print, noise_print, x_recon_print,pred_noise_print], axis=0)
             imwrite(img_print, save_img_path)
-        l_g_total = 0
+
         loss_dict = OrderedDict()
 
-        l_g_x0 = F.l1_loss(x_recon_cs, x_start) * self.opt['train'].get('l_g_x0_w', 1.0)
-        if self.opt['train'].get('gamma_limit_train', None) and color_scale <= self.opt['train'].get('gamma_limit_train', None):
-            l_g_x0 = l_g_x0 * 1e-12
-        loss_dict['l_g_x0'] = l_g_x0
-        l_g_total += l_g_x0
-
-        if not self.opt['train'].get('frozen_denoise', False):
-            l_g_noise = F.l1_loss(pred_noise, noise)
-            loss_dict['l_g_noise'] = l_g_noise
-            l_g_total += l_g_noise
+        loss_hvi = self.l_hvi_l1(x_recon_hvi, x_start_hvi) + self.l_hvi_ssim(x_recon_hvi, x_start_hvi) + self.l_hvi_edge(x_recon_hvi, x_start_hvi) + self.l_hvi_percep(x_recon_hvi, x_start_hvi)[0]
+        loss_hvi = loss_hvi * self.opt['train'].get('hvi_weight', 1.0)
+        loss_rgb = self.l_rgb_l1(x_recon_rgb, x_start_rgb) + self.l_rgb_ssim(x_recon_rgb, x_start_rgb) + self.l_rgb_edge(x_recon_rgb, x_start_rgb) + self.l_rgb_percep(x_recon_rgb, x_start_rgb)[0]
+        loss_noise = self.l_noise(noise, pred_noise)
+        loss_dict['l_g_hvi'] = loss_hvi 
+        loss_dict['l_g_rgb'] = loss_rgb
+        loss_dict['l_g_noise'] = loss_noise
+        l_g_total = loss_rgb + loss_hvi + loss_noise
 
         l_g_total.backward()
         self.optimizer_g.step()
         self.log_dict = self.reduce_loss_dict(loss_dict)
+
 
     def test(self):
         if self.opt['val'].get('test_speed', False):
