@@ -1,7 +1,7 @@
 # general settings
 name: train_hvi
 model_type: HviDiffModel
-num_gpu: 1
+num_gpu: 4
 manual_seed: 0
 
 # dataset and data loader settings
@@ -26,7 +26,7 @@ datasets:
     # data loader
     use_shuffle: true
     num_worker_per_gpu: 8
-    batch_size_per_gpu: 8
+    batch_size_per_gpu: 16
     dataset_enlarge_ratio: 1
     prefetch_mode: ~
 
@@ -57,7 +57,8 @@ network_unet:
   res_blocks: 2
   dropout: 0.2
   divide: 16
-  use_frequency_block: true
+  use_frequency_block: false
+  use_DWConv: false
 
 network_ddpm:
   type: GaussianDiffusion
@@ -91,7 +92,7 @@ train:
   train_type: ddpm_hvi_pyramid
   t_border: 1000
   input_mode: crop
-  crop_size: [192, 288]
+  crop_size: [64, 64]
   optim_g:
     type: Adam
     lr: !!float 1e-4

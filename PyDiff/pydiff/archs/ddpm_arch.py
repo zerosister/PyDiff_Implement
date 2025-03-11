@@ -578,8 +578,10 @@ class GaussianDiffusion(nn.Module):
         
 
         r = self.downsampling_schedule[t - 1]
-        x_HR = F.interpolate(x_HR, (x_HR.shape[2] // r, x_HR.shape[3] // r))
-        x_SR = F.interpolate(x_SR, (x_SR.shape[2] // r, x_SR.shape[3] // r))
+        new_h = torch.div(h, r, rounding_mode='trunc').int()
+        new_w = torch.div(w, r, rounding_mode='trunc').int()
+        x_HR = F.interpolate(x_HR, (new_h, new_w))
+        x_SR = F.interpolate(x_SR, (new_h, new_w))
         
         _, _, H, W = x_HR.shape
         if input_mode == 'crop':

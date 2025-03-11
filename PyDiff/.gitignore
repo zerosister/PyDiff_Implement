@@ -1,4 +1,5 @@
 # ignored folders
+_MACOSX/*
 datasets/*
 experiments/*
 results/*

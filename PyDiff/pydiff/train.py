@@ -7,10 +7,10 @@ import pydiff.data
 import pydiff.models
 
 if __name__ == '__main__':
-    import debugpy
-    print("waiting for debugger to attach")
-    debugpy.listen(5678)
-    debugpy.wait_for_client()
-    print("debugger attached")
+    # import debugpy
+    # print("waiting for debugger to attach")
+    # debugpy.listen(5678)
+    # debugpy.wait_for_client()
+    # print("debugger attached")
     root_path = osp.abspath(osp.join(__file__, osp.pardir, osp.pardir))
     train_pipeline(root_path)

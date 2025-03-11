@@ -183,10 +183,10 @@ class HviDiffModel(BaseModel):
             '''
             save_img_path = osp.join(self.opt['path']['visualization'], 'train',
                                             f'{current_iter}_noise_level_{self.bare_model.t}.png')
-            x_recon_print = tensor2img(self.bare_model.x_recon_rgb, min_max=(-1, 1))
+            x_recon_print = tensor2img(self.bare_model.x_recon_rgb, min_max=(0, 1))
             noise_print = tensor2img(self.bare_model.noise, min_max=(-1, 1))
             pred_noise_print = tensor2img(self.bare_model.pred_noise, min_max=(-1, 1))
-            x_start_print = tensor2img(self.bare_model.x_rgb_HR, min_max=(-1, 1))
+            x_start_print = tensor2img(self.bare_model.x_rgb_HR, min_max=(0, 1))
             # x_noisy_print = tensor2img(self.bare_model.x_noisy, min_max=(-1, 1))
 
             img_print  = np.concatenate([x_start_print, noise_print, x_recon_print,pred_noise_print], axis=0)

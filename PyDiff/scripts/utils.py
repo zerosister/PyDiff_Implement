@@ -67,7 +67,7 @@ def hiseq_color_cv2_img(img):
 def generate_position_encoding(H, W, L=1):
     x_range = torch.arange(H) / H
     y_range = torch.arange(W) / W
-    x, y = torch.meshgrid(x_range, y_range) # 表示了每一个像素对应的 横纵坐标，故 x,y 都是 H*W 维的向量
+    x, y = torch.meshgrid(x_range, y_range, indexing='ij') # 表示了每一个像素对应的 横纵坐标，故 x,y 都是 H*W 维的向量
     y_sin, y_cos = torch.sin(y), torch.cos(y)
     x_sin, x_cos = torch.sin(x), torch.cos(x)
     position_encoding = []
